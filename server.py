@@ -76,11 +76,18 @@ def errors(version=None):
 
 @app.route("/monitor", methods=["post"])
 def monitor():
-    previous_errors = error_parser.RedisErrorDef.get_all()
+    # Fetch all previous errors that were not encountered during previous
+    # monitoring
+    previous_errors = {
+        key: err
+        for key, err in error_parser.RedisErrorDef.get_all().iteritems()
+        if err.get("count") > 0}
     new_errors = {}
     params = request.get_json()
     error_logs = params['logs']
     log_hour = params['log_hour']
+
+    # Track counts during monitoring for each error
     error_counts = {}
 
     for log in error_logs:
