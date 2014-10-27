@@ -30,7 +30,7 @@ def errors(version=None):
          for h1 in xrange(0, 7*24, 6)]
 
     for key in r.smembers("errors"):
-        err_def = error_parser.RedisErrorDef(key)
+        err_def = error_parser.RedisErrorDef.get_by_key(key)
         if version and err_def.get("monitor_count:%s" % version):
             errors.append({
                 "monitoring": version,

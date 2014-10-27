@@ -18,6 +18,9 @@ URI_BLACKLIST = [
 
 r = redis.StrictRedis(host='localhost', port=6379, db=0)
 
+error_cache = {}
+error_cache_id = None
+
 class MessageDef(object):
     def __init__(self, message):
         msg_lines = message.split("\n")
@@ -61,6 +64,8 @@ class MessageDef(object):
 class RedisErrorDef(object):
     def __init__(self, key):
         self.key = key
+        self.cache = {}
+        self.cache["count"] = r.get("%s:count" % key)
 
     @staticmethod
     def create(log_hour, message_def, status, level):
@@ -83,8 +88,19 @@ class RedisErrorDef(object):
         return RedisErrorDef(key)
 
     @staticmethod
+    def get_by_key(key):
+        if key not in error_cache:
+            error_cache[key] = RedisErrorDef(key)
+
+        elif r.get("%s:count" % key) != error_cache[key].cache["count"]:
+            error_cache[key] = RedisErrorDef(key)
+
+        return error_cache[key]
+
+    @staticmethod
     def get_all():
-        return {key: RedisErrorDef(key) for key in r.smembers("errors")}
+        return {key: RedisErrorDef.get_by_key(key)
+                for key in r.smembers("errors")}
 
     @staticmethod
     def get_or_create_def(log_hour, message_def, status, level):
@@ -139,10 +155,14 @@ class RedisErrorDef(object):
         return None
 
     def get(self, field):
-        return r.get("%s:%s" % (self.key, field))
+        if field not in self.cache:
+            self.cache[field] = r.get("%s:%s" % (self.key, field))
+        return self.cache[field]
 
     def members(self, field):
-        return r.smembers("%s:%s" % (self.key, field))
+        if field not in self.cache:
+            self.cache[field] = r.smembers("%s:%s" % (self.key, field))
+        return self.cache[field]
 
     def get_uris(self):
         uri_set = self.members("uris")
