@@ -124,8 +124,9 @@ class RedisErrorDef(object):
         if log_hour > r.get("%s:last_seen" % self.key):
             r.set("%s:last_seen" % self.key, log_hour)
 
-    def add_monitoring_instance(self, version, ip, resource):
+    def add_monitoring_instance(self, version, minute, ip, resource):
         r.incr("%s:monitor_count:%s" % (self.key, version))
+        r.incr("%s:monitor_count:%s:%s" % (self.key, version, minute))
         r.sadd("%s:monitor_ips" % self.key, ip)
         r.sadd("%s:monitor_uris" % self.key, resource)
 

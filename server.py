@@ -5,6 +5,7 @@ import json
 import redis
 
 import error_parser
+import statistics_util
 
 app = Flask("Khan Academy Error Monitor")
 r = redis.StrictRedis(host='localhost', port=6379, db=0)
@@ -78,17 +79,12 @@ def errors(version=None):
 def monitor():
     # Fetch all previous errors that were not encountered during previous
     # monitoring
-    previous_errors = {
-        key: err
-        for key, err in error_parser.RedisErrorDef.get_all().iteritems()
-        if err.get("count") > 0}
-    new_errors = {}
     params = request.get_json()
     error_logs = params['logs']
     log_hour = params['log_hour']
-
-    # Track counts during monitoring for each error
-    error_counts = {}
+    minute = params['minute']
+    version = params['version']
+    verify_versions = params['verify_versions']
 
     for log in error_logs:
         if any(log['resource'].startswith(uri)
@@ -101,43 +97,48 @@ def monitor():
         err_def = error_parser.RedisErrorDef.get_or_create_def(
                 log_hour, message_def, status, level)
         err_def.add_monitoring_instance(
-                log['version_id'], log['ip'], log['resource'])
+                version, minute, log['ip'], log['resource'])
 
-        if err_def.key not in previous_errors:
-            new_errors[err_def.key] = err_def
+    if not verify_versions:
+        return json.dumps({"status": "ok", "version": version})
 
-        error_counts[err_def.key] = error_counts.get(err_def.key, 0) + 1
+    significant_errors = []
+    for key in r.smembers("errors"):
+        err_def = error_parser.RedisErrorDef.get_by_key(key)
+        monitor_count = int(
+            err_def.get("monitor_count:%s:%s" % (version, minute)) or 0)
+        if monitor_count == 0:
+            continue
 
-    previous_errors = {
-        key: err_def
-        for key, err_def in previous_errors.iteritems()
-        if key in error_counts
-    }
+        print "MONITORING ERROR IN %s: %s" % (
+                version, err_def.get("message:title"))
+        max_version_count = max(
+            [int(err_def.get("monitor_count:%s:%s" % (verify_version, minute))
+                or 0) for verify_version in verify_versions])
 
-    return json.dumps({
-        "new_errors": [
-            {
+        # TODO(tom) Use all 5 values to do a chi-squared test or something
+        # smarter
+        (_, probability) = statistics_util.count_is_elevated_probability(
+                max_version_count, 1, monitor_count, 1)
+
+        if probability >= 0.9995:
+            significant_errors.append({
                 "key": err_def.key,
                 "status": int(err_def.get("status")),
                 "level": error_parser.LEVELS[int(err_def.get("level"))],
                 "stack": err_def.get("stack"),
                 "message": err_def.get("message:title"),
-                "count": error_counts[err_def.key]
-            }
-            for err_def in new_errors.values()
-        ],
-        "existing_errors": [
-            {
-                "key": err_def.key,
-                "status": int(err_def.get("status")),
-                "level": error_parser.LEVELS[int(err_def.get("level"))],
-                "stack": err_def.get("stack"),
-                "message": err_def.get("message:title"),
-                "count": error_counts[err_def.key]
-            }
-            for err_def in previous_errors.values()
-        ]
-    })
+                "minute": minute,
+                "monitor_count": monitor_count,
+                "expected_count": max_version_count,
+                "probability": probability
+            })
+
+    if not significant_errors:
+        return json.dumps({"status": "ok", "version": version})
+
+    return json.dumps({"status": "found", "version": version,
+        "errors": significant_errors})
 
 
 if __name__ == "__main__":
