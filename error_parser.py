@@ -222,6 +222,9 @@ def logs_from_biguery(bq_util, log_hour):
         if any(resource.startswith(uri) for uri in URI_BLACKLIST):
             continue
 
+        if version_id.startswith("znd"):
+            continue
+
         message_def = MessageDef(message)
         error_def = RedisErrorDef.get_or_create_def(
                 log_hour, message_def, status, level)
