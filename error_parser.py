@@ -164,8 +164,8 @@ class RedisErrorDef(object):
             return sorted(list(versions))[0]
         return None
 
-    def get_time_series(self, hour_buckets):
-        version_set = self.members("versions")
+    def get_time_series(self, hour_buckets, version=None):
+        version_set = [version] if version else self.members("versions")
         time_series = []
         for bucket in hour_buckets:
             version_counts = {}

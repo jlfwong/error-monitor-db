@@ -61,8 +61,9 @@ def errors(version=None):
                 "uris": err_def.get_uris(),
                 "versions": err_def.get_versions(),
                 "newInVersion": version == err_def.get_earliest_version(),
-                "dayTimeSeries": err_def.get_time_series(day_buckets),
-                "weekTimeSeries": err_def.get_time_series(week_buckets),
+                "dayTimeSeries": err_def.get_time_series(day_buckets, version),
+                "weekTimeSeries": err_def.get_time_series(
+                    week_buckets, version),
             })
 
     return json.dumps({
