@@ -1,0 +1,3 @@
+[submodule "python-phabricator"]
+	path = python-phabricator
+	url = https://github.com/Khan/python-phabricator.git
