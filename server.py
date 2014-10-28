@@ -1,16 +1,16 @@
 import datetime
-from flask import Flask
-from flask import request
 import json
-import numpy
 import os
+import sys
+
+import flask
+import numpy
 import redis
 import scipy.stats
-import sys
 
 import error_parser
 
-app = Flask("Khan Academy Error Monitor")
+app = flask.Flask("Khan Academy Error Monitor")
 r = redis.StrictRedis(host='localhost', port=6379, db=0)
 
 # We need to load python-phabricator.  On the error-monitor-db
@@ -67,22 +67,8 @@ def _count_is_elevated_probability(historical_counts, recent_count):
     return (mean, zscore)
 
 
-@app.route("/errors")
-@app.route("/errors/<version>")
-def errors(version=None):
-    errors = []
-
-    # Get error data from Phabricator
-    phabricator_domain = 'http://phabricator.khanacademy.org'
-    phabctl = phabricator.Phabricator(host=phabricator_domain + '/api/')
-    tasks = phabctl.maniphest.maniphest.query(
-            projectPHIDs=["PHID-PROJ-wac5cp5twq6xcgubphie"])
-    error_status_by_key = {}
-    for task_id in tasks.keys():
-        task = tasks[task_id]
-        task_key = task["auxiliary"]["std:maniphest:khan:errorkey"]
-        error_status_by_key[task_key] = (task["objectName"], task["status"])
-    
+def build_recent_buckets():
+    """Return buckets for the last 24 hours and the last 7 days."""
     # Create buckets for each hour in last 24 hours
     start = datetime.datetime.now() - datetime.timedelta(1, 0, 0, 0, 0, 0)
     day_buckets = [
@@ -93,56 +79,128 @@ def errors(version=None):
     start = datetime.datetime.now() - datetime.timedelta(7, 0, 0, 0, 0, 1)
     week_buckets = [
         [(start +
-            datetime.timedelta(0, 0, 0, 0, 0, h1+h2)).strftime("%Y%m%d_%H")
+            datetime.timedelta(0, 0, 0, 0, 0, h1 + h2))
+                .strftime("%Y%m%d_%H")
          for h2 in xrange(0, 6)]
-         for h1 in xrange(0, 7*24, 6)]
+         for h1 in xrange(0, 7 * 24, 6)]
 
-    for key in r.smembers("errors"):
-        err_def = error_parser.RedisErrorDef.get_by_key(key)
-        task_info = error_status_by_key.get(key, ("", "No task created"))
-        if version and err_def.get("monitor_count:%s" % version):
-            errors.append({
-                "key": err_def.key,
-                "monitoring": version,
-                "count": int(err_def.get("monitor_count:%s" % version)),
-                "status": int(err_def.get("status")),
-                "level": error_parser.LEVELS[int(err_def.get("level"))],
-                "stack": json.loads(err_def.get("stack")),
-                "message": err_def.get("message:title"),
-                "ips": list(err_def.members("monitor_ips")),
-                "uris": {uri: 0 for uri in err_def.members("monitor_uris")},
-                "versions": {version: 0},
-                "newInVersion": len(err_def.get_versions()) == 0,
-                "dayTimeSeries": [],
-                "weekTimeSeries": [],
-                "taskId": task_info[0],
-                "taskStatus": task_info[1],
-            })
+    return day_buckets, week_buckets
 
-        if int(err_def.get("count")) and (
-                not version or version in err_def.get_versions()):
-            errors.append({
-                "key": err_def.key,
-                "count": int(err_def.get("count")),
-                "status": int(err_def.get("status")),
-                "level": error_parser.LEVELS[int(err_def.get("level"))],
-                "firstSeen": err_def.get("first_seen"),
-                "lastSeen": err_def.get("last_seen"),
-                "stack": json.loads(err_def.get("stack")),
-                "message": err_def.get("message:title"),
-                "ips": list(err_def.members("ips")),
-                "uris": err_def.get_uris(),
-                "versions": err_def.get_versions(),
-                "newInVersion": version == err_def.get_earliest_version(),
-                "dayTimeSeries": err_def.get_time_series(day_buckets, version),
-                "weekTimeSeries": err_def.get_time_series(
-                    week_buckets, version),
-                "taskId": task_info[0],
-                "taskStatus": task_info[1],
-            })
+
+@app.route("/errors/<errorkey>")
+def error_details(errorkey, version=None):
+    # TODO(jlfwong): Deal with monitoring
+    # TODO(jlfwong): Deal with specific versions
+    err_def = error_parser.RedisErrorDef.get_by_key(errorkey)
+
+    day_buckets, week_buckets = build_recent_buckets()
 
     return json.dumps({
-        "errors": errors,
+        "key": err_def.key,
+        "count": err_def.get_total_count(),
+        "status": int(err_def.get("status") or 0) or None,
+        "level": error_parser.LEVELS[int(err_def.get("level"))],
+        "firstSeen": err_def.get("first_seen"),
+        "lastSeen": err_def.get("last_seen"),
+        "message": err_def.get("message:title"),
+        "mostCommonRoute": err_def.get_most_common_route(),
+        "uniqueRouteCount": err_def.get_num_unique_routes(),
+        "uniqueIpCount": err_def.get_num_unique_ips(),
+        "versions": err_def.get_versions(),
+        "newInVersion": version == err_def.get_earliest_version(),
+        "dayTimeSeries": err_def.get_time_series(day_buckets, version),
+        "weekTimeSeries": err_def.get_time_series(week_buckets, version),
+        # Detail only information starts here
+        "routes": err_def.get_routes(),
+        "stacks": err_def.get_stacks()
+    })
+
+
+@app.route("/errors")
+@app.route("/versions/<version>/errors")
+def errors(version=None):
+    # Get task data from Phabricator
+    #
+    # TODO(jlfwong): Cache this, and invalidate whenever someone clicks to
+    # create a new task
+    #
+    # phabricator_domain = 'http://phabricator.khanacademy.org'
+    # phabctl = phabricator.Phabricator(host=phabricator_domain + '/api/')
+    # tasks = phabctl.maniphest.maniphest.query(
+    #         projectPHIDs=["PHID-PROJ-wac5cp5twq6xcgubphie"])
+    # error_status_by_key = {}
+    # for task_id in tasks.keys():
+    #     task = tasks[task_id]
+    #     task_key = task["auxiliary"]["std:maniphest:khan:errorkey"]
+    #     error_status_by_key[task_key] = (task["objectName"], task["status"])
+
+    day_buckets, week_buckets = build_recent_buckets()
+
+    # TODO(jlfwong): Pagination. Right now we just either display *all* errors
+    # during monitoring, or the top 20 errors otherwise.
+    error_defs = []
+
+    monitoring = flask.request.args.get('monitoring')
+
+    if monitoring:
+        if not version:
+            # If you want monitoring, you have to specify a version!
+            flask.abort(400)
+
+        error_defs = error_parser.RedisErrorDef.get_errors_during_monitoring(
+                                                    version)
+    elif version:
+        error_defs = error_parser.RedisErrorDef.get_errors_for_version(
+                                                    version, 20)
+    else:
+        error_defs = error_parser.RedisErrorDef.get_errors(20)
+
+    error_dicts = []
+    for err_def in error_defs:
+        err_dict = {
+            "key": err_def.key,
+            "count": err_def.get_total_count(),
+            "status": int(err_def.get("status") or 0) or None,
+            "level": error_parser.LEVELS[int(err_def.get("level"))],
+            "firstSeen": err_def.get("first_seen"),
+            "lastSeen": err_def.get("last_seen"),
+            "message": err_def.get("message:title"),
+            "mostCommonRoute": err_def.get_most_common_route(),
+            "uniqueRouteCount": err_def.get_num_unique_routes(),
+            "uniqueIpCount": err_def.get_num_unique_ips(),
+            "versions": err_def.get_versions(),
+            "newInVersion": version == err_def.get_earliest_version(),
+            "dayTimeSeries": err_def.get_time_series(day_buckets, version),
+            "weekTimeSeries": err_def.get_time_series(week_buckets, version)
+        }
+
+        # TODO(jlfwong): All of this special casing for monitoring is done
+        # because if we don't do this, we'll double count errors, because we'll
+        # read them once from monitoring, and again from loading errors from
+        # BigQuery. This whole problem would go away if
+        #
+        #   1. We had a way of tracking whether we'd recorded a specific error
+        #      instance before. Perhaps this is possible by timestamp.
+        #
+        #   or
+        #
+        #   2. We streamed errors all the time instead of loading from
+        #      BigQuery.
+        if monitoring:
+            err_dict['monitoring'] = {
+                "count": err_def.get_count_during_monitoring(version),
+                "mostCommonRoute":
+                    err_def.get_most_common_route_during_monitoring(version),
+                "uniqueRouteCount":
+                    err_def.get_num_unique_routes_during_monitoring(version),
+                "uniqueIpCount":
+                    err_def.get_num_unique_ips_during_monitoring(version),
+            }
+
+        error_dicts.append(err_dict)
+
+    return json.dumps({
+        "errors": error_dicts,
         "dayTimeCategories": [b[0] for b in day_buckets],
         "weekTimeCategories": [b[0] for b in week_buckets],
         "lastHour": error_parser.latest_hour()
@@ -171,7 +229,9 @@ def create_task(error_key):
        err_def.get("message:title"))
     projectPHIDs = ["PHID-PROJ-wac5cp5twq6xcgubphie"]
     auxiliary = {"std:maniphest:khan:errorkey": error_key}
-    res = phabctl.maniphest.createtask(title=title, projectPHIDs=projectPHIDs, auxiliary=auxiliary)
+    res = phabctl.maniphest.createtask(title=title,
+                                       projectPHIDs=projectPHIDs,
+                                       auxiliary=auxiliary)
     return json.dumps({
         "status": "ok",
         "url": "http://phabricator.khanacademy.org/%s" % res['objectName']
@@ -182,12 +242,14 @@ def create_task(error_key):
 def monitor():
     # Fetch all previous errors that were not encountered during previous
     # monitoring
-    params = request.get_json()
+    params = flask.request.get_json()
     error_logs = params['logs']
     log_hour = params['log_hour']
     minute = params['minute']
     version = params['version']
     verify_versions = params['verify_versions']
+
+    errs_to_check = set()
 
     for log in error_logs:
         if any(log['resource'].startswith(uri)
@@ -197,27 +259,29 @@ def monitor():
         message_def = error_parser.MessageDef(log['message'])
         status = str(log['status'])
         level = str(log['level'])
-        err_def = error_parser.RedisErrorDef.get_or_create_def(
+        err_def = error_parser.RedisErrorDef.get_or_create(
                 log_hour, message_def, status, level)
-        err_def.add_monitoring_instance(
-                version, minute, log['ip'], log['resource'])
+        err_def.record_occurrence_from_monitoring(message_def, minute,
+                version, log['ip'], log['resource'], log['route'],
+                log['module_id'])
+
+        errs_to_check.add(err_def)
 
     if not verify_versions:
         return json.dumps({"status": "ok", "version": version})
 
     significant_errors = []
-    for key in r.smembers("errors"):
-        err_def = error_parser.RedisErrorDef.get_by_key(key)
-        monitor_count = int(
-            err_def.get("monitor_count:%s:%s" % (version, minute)) or 0)
+    for err_def in errs_to_check:
+        monitor_count = err_def.get_count_during_monitoring_minute(version,
+                                                                   minute)
         if monitor_count == 0:
             continue
 
         print "MONITORING ERROR IN %s: %s" % (
                 version, err_def.get("message:title"))
         version_counts = [
-            int(err_def.get("monitor_count:%s:%s" % (verify_version, minute))
-            or 0) for verify_version in verify_versions]
+            err_def.get_count_during_monitoring_minute(verify_version, minute)
+            for verify_version in verify_versions]
 
         (expected_count, probability) = _count_is_elevated_probability(
                 version_counts, monitor_count)
@@ -227,7 +291,6 @@ def monitor():
                 "key": err_def.key,
                 "status": int(err_def.get("status")),
                 "level": error_parser.LEVELS[int(err_def.get("level"))],
-                "stack": err_def.get("stack"),
                 "message": err_def.get("message:title"),
                 "minute": minute,
                 "monitor_count": monitor_count,
