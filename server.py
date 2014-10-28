@@ -149,6 +149,35 @@ def errors(version=None):
     })
 
 
+@app.route("/createtask/<error_key>")
+def create_task(error_key):
+    # Search for an existing task associated with this error key
+    phabricator_domain = 'http://phabricator.khanacademy.org'
+    phabctl = phabricator.Phabricator(host=phabricator_domain + '/api/')
+    tasks = phabctl.maniphest.maniphest.query(
+            projectPHIDs=["PHID-PROJ-wac5cp5twq6xcgubphie"])
+    for task_id in tasks.keys():
+        task = tasks[task_id]
+        task_key = task["auxiliary"]["std:maniphest:khan:errorkey"]
+        if task_key == error_key:
+            return json.dumps({
+                "status": "already_exists"
+            })
+
+    err_def = error_parser.RedisErrorDef.get_by_key(error_key)
+    title = "%s (%s): %s" % (
+       error_parser.LEVELS[int(err_def.get("level"))],
+       err_def.get("status"),
+       err_def.get("message:title"))
+    projectPHIDs = ["PHID-PROJ-wac5cp5twq6xcgubphie"]
+    auxiliary = {"std:maniphest:khan:errorkey": error_key}
+    res = phabctl.maniphest.createtask(title=title, projectPHIDs=projectPHIDs, auxiliary=auxiliary)
+    return json.dumps({
+        "status": "ok",
+        "url": "http://phabricator.khanacademy.org/%s" % res['objectName']
+    })
+
+
 @app.route("/monitor", methods=["post"])
 def monitor():
     # Fetch all previous errors that were not encountered during previous
