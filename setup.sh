@@ -3,7 +3,7 @@
 # Assumes that this repo is checked out at /home/ubuntu/error-monitor-db
 
 apt-get update
-apt-get -y install redis-server python-pip
+apt-get -y install redis-server python-pip python-dev python-numpy python-scipy
 pip install Flask
 pip install oauth2client
 pip install google-api-python-client

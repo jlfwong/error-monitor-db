@@ -2,13 +2,59 @@ import datetime
 from flask import Flask
 from flask import request
 import json
+import numpy
 import redis
+import scipy.stats
 
 import error_parser
-import statistics_util
 
 app = Flask("Khan Academy Error Monitor")
 r = redis.StrictRedis(host='localhost', port=6379, db=0)
+
+
+def _count_is_elevated_probability(historical_counts, recent_count):
+    """Give the probability recent_count is elevated over the norm.
+
+    We are given a collection of recent counts, each over a 1-minute time
+    frame, and must decide how likely the new count is to be within a normal
+    distribution represented by the historical counts.
+
+    Arguments:
+       historical_count: a list of the number of errors seen in each time
+           window in 'the past'.
+       recent_count: the number of errors seen in 'the present'.
+
+    Returns:
+       A pair: the expected number of errors we would have seen this period,
+          and the probability that the number of errors we actually saw
+          is actually higher than the expected number, both as floats.
+    """
+    if not historical_counts:
+        # We don't have any history, so we can't make any guesses
+        return (0, 0)
+
+    if len(historical_counts) == 1:
+        # We only have one data point, so do a simple threshold check
+        return (historical_counts[0],
+                1 if recent_count > historical_counts[0] else 0)
+
+    counts = numpy.array(historical_counts)
+    mean = numpy.mean(counts)
+
+    if recent_count < mean:
+        # If the error count went down, we don't care about the probability
+        return (mean, 0)
+
+    stdev = numpy.std(counts)
+
+    if stdev < 1:
+        # Avoid a division by zero error
+        return (mean, 1 if recent_count > mean else 0)
+
+    pvalue = (recent_count - mean) / stdev
+    zscore = scipy.stats.norm.cdf(pvalue)
+
+    return (mean, zscore)
 
 
 @app.route("/errors")
@@ -112,14 +158,12 @@ def monitor():
 
         print "MONITORING ERROR IN %s: %s" % (
                 version, err_def.get("message:title"))
-        max_version_count = max(
-            [int(err_def.get("monitor_count:%s:%s" % (verify_version, minute))
-                or 0) for verify_version in verify_versions])
+        version_counts = [
+            int(err_def.get("monitor_count:%s:%s" % (verify_version, minute))
+            or 0) for verify_version in verify_versions]
 
-        # TODO(tom) Use all 5 values to do a chi-squared test or something
-        # smarter
-        (_, probability) = statistics_util.count_is_elevated_probability(
-                max_version_count, 1, monitor_count, 1)
+        (expected_count, probability) = _count_is_elevated_probability(
+                version_counts, monitor_count)
 
         if probability >= 0.9995:
             significant_errors.append({
@@ -130,7 +174,7 @@ def monitor():
                 "message": err_def.get("message:title"),
                 "minute": minute,
                 "monitor_count": monitor_count,
-                "expected_count": max_version_count,
+                "expected_count": expected_count,
                 "probability": probability
             })
 
