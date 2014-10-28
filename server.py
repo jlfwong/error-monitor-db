@@ -3,13 +3,23 @@ from flask import Flask
 from flask import request
 import json
 import numpy
+import os
 import redis
 import scipy.stats
+import sys
 
 import error_parser
 
 app = Flask("Khan Academy Error Monitor")
 r = redis.StrictRedis(host='localhost', port=6379, db=0)
+
+# We need to load python-phabricator.  On the error-monitor-db
+# install, it lives in a particular place we know about.  We take
+# advantage of the knowledge that this file lives in the root-dir
+# of error-monitor-db.
+_INTERNAL_WEBSERVER_ROOT = os.path.abspath(os.path.dirname(__file__))
+sys.path.append(os.path.join(_INTERNAL_WEBSERVER_ROOT, 'python-phabricator'))
+import phabricator
 
 
 def _count_is_elevated_probability(historical_counts, recent_count):
@@ -61,6 +71,17 @@ def _count_is_elevated_probability(historical_counts, recent_count):
 @app.route("/errors/<version>")
 def errors(version=None):
     errors = []
+
+    # Get error data from Phabricator
+    phabricator_domain = 'http://phabricator.khanacademy.org'
+    phabctl = phabricator.Phabricator(host=phabricator_domain + '/api/')
+    tasks = phabctl.maniphest.maniphest.query(
+            projectPHIDs=["PHID-PROJ-wac5cp5twq6xcgubphie"])
+    error_status_by_key = {}
+    for task_id in tasks.keys():
+        task = tasks[task_id]
+        task_key = task["auxiliary"]["std:maniphest:khan:errorkey"]
+        error_status_by_key[task_key] = (task["objectName"], task["status"])
     
     # Create buckets for each hour in last 24 hours
     start = datetime.datetime.now() - datetime.timedelta(1, 0, 0, 0, 0, 0)
@@ -78,8 +99,10 @@ def errors(version=None):
 
     for key in r.smembers("errors"):
         err_def = error_parser.RedisErrorDef.get_by_key(key)
+        task_info = error_status_by_key.get(key, ("", "No task created"))
         if version and err_def.get("monitor_count:%s" % version):
             errors.append({
+                "key": err_def.key,
                 "monitoring": version,
                 "count": int(err_def.get("monitor_count:%s" % version)),
                 "status": int(err_def.get("status")),
@@ -92,11 +115,14 @@ def errors(version=None):
                 "newInVersion": len(err_def.get_versions()) == 0,
                 "dayTimeSeries": [],
                 "weekTimeSeries": [],
+                "taskId": task_info[0],
+                "taskStatus": task_info[1],
             })
 
         if int(err_def.get("count")) and (
                 not version or version in err_def.get_versions()):
             errors.append({
+                "key": err_def.key,
                 "count": int(err_def.get("count")),
                 "status": int(err_def.get("status")),
                 "level": error_parser.LEVELS[int(err_def.get("level"))],
@@ -111,6 +137,8 @@ def errors(version=None):
                 "dayTimeSeries": err_def.get_time_series(day_buckets, version),
                 "weekTimeSeries": err_def.get_time_series(
                     week_buckets, version),
+                "taskId": task_info[0],
+                "taskStatus": task_info[1],
             })
 
     return json.dumps({
